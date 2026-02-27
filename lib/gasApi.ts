@@ -1,5 +1,5 @@
 ﻿export type GasApiSuccess<T = unknown> = {
-  status: 200;
+  status: number;
   ok: true;
   data: T;
   email?: string;
@@ -26,13 +26,6 @@ export class GasApiError extends Error {
   }
 }
 
-const gasWebAppUrl = process.env.NEXT_PUBLIC_GAS_WEBAPP_URL;
-
-function normalizeStatus(rawStatus: number | undefined, fallback: number): number {
-  if (typeof rawStatus !== "number") return fallback;
-  return rawStatus;
-}
-
 function messageFromStatus(status: number): string {
   if (status === 401) return "認証に失敗しました。Googleで再ログインしてください。";
   if (status === 403) return "このアカウントにはアクセス権限がありません。";
@@ -45,13 +38,9 @@ export async function callGasApi<T = unknown>(
   action: string,
   payload?: Record<string, unknown>,
 ): Promise<GasApiSuccess<T>> {
-  if (!gasWebAppUrl) {
-    throw new GasApiError("NEXT_PUBLIC_GAS_WEBAPP_URL が未設定です。", 0, "missing_gas_url");
-  }
-
   let response: Response;
   try {
-    response = await fetch(gasWebAppUrl, {
+    response = await fetch("/api/gas", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ idToken, action, payload: payload ?? {} }),
@@ -67,15 +56,13 @@ export async function callGasApi<T = unknown>(
     body = {};
   }
 
-  const status = normalizeStatus(body.status, response.status);
-  const ok = status === 200 && body.ok === true;
-  if (!ok) {
-    const message = body.message || messageFromStatus(status);
-    throw new GasApiError(message, status, body.code);
+  if (!response.ok || body.ok !== true) {
+    const message = body.message || messageFromStatus(response.status);
+    throw new GasApiError(message, response.status, body.code);
   }
 
   return {
-    status: 200,
+    status: response.status,
     ok: true,
     data: (body.data as T) ?? ({} as T),
     email: body.email,

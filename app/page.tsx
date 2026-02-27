@@ -1,7 +1,7 @@
 ﻿"use client";
 
 import Script from "next/script";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { GasApiError, callGasApi } from "@/lib/gasApi";
 
 type AuthState =
@@ -24,9 +24,11 @@ type UserInfo = {
   picture?: string;
 };
 
-type GasPingResult = {
+type SessionCreateResult = {
   ok: boolean;
   now: string;
+  sessionToken: string;
+  expiresIn: number;
 };
 
 type GoogleCredentialResponse = {
@@ -94,9 +96,16 @@ export default function Page() {
   const [authState, setAuthState] = useState<AuthState>("checking");
   const [user, setUser] = useState<UserInfo | null>(null);
   const [scriptReady, setScriptReady] = useState(false);
-  const [apiResult, setApiResult] = useState<GasPingResult | null>(null);
+  const [apiResult, setApiResult] = useState<SessionCreateResult | null>(null);
   const [errorMessage, setErrorMessage] = useState("");
+  const [sessionToken, setSessionToken] = useState("");
   const buttonRef = useRef<HTMLDivElement | null>(null);
+
+  const iframeSrc = useMemo(() => {
+    if (!gasUrl || !sessionToken) return "";
+    const sep = gasUrl.includes("?") ? "&" : "?";
+    return `${gasUrl}${sep}st=${encodeURIComponent(sessionToken)}`;
+  }, [sessionToken]);
 
   const handleCredential = useCallback(async (response: GoogleCredentialResponse) => {
     if (!response.credential) {
@@ -116,17 +125,19 @@ export default function Page() {
     setErrorMessage("");
 
     try {
-      const gasResponse = await callGasApi<GasPingResult>(response.credential, "ping", {});
+      const gasResponse = await callGasApi<SessionCreateResult>(response.credential, "createSession", {});
       setUser({
         email: payload.email,
         name: payload.name ?? payload.email,
         picture: payload.picture,
       });
       setApiResult(gasResponse.data);
+      setSessionToken(gasResponse.data.sessionToken);
       setAuthState("signed_in");
     } catch (error) {
       setUser(null);
       setApiResult(null);
+      setSessionToken("");
       setAuthState(error instanceof GasApiError && error.status === 403 ? "denied" : "error");
       setErrorMessage(toUserMessage(error));
     }
@@ -174,6 +185,7 @@ export default function Page() {
     if (google) google.accounts.id.disableAutoSelect();
     setUser(null);
     setApiResult(null);
+    setSessionToken("");
     setErrorMessage("");
     setAuthState("signed_out");
   };
@@ -203,7 +215,7 @@ export default function Page() {
       ) : authState !== "signed_in" ? (
         <section className="notice">
           <h2>Google ログインが必要です</h2>
-          <p className="noticeText">ログイン成功後に id_token を GAS へ POST して認証します。</p>
+          <p className="noticeText">ログイン成功後に id_token を Next.js サーバー経由で GAS へ POST します。</p>
           <div ref={buttonRef} className="googleButton" />
           {authState === "authorizing" ? <p className="noticeText">認証中...</p> : null}
           {authState === "denied" || authState === "error" ? (
@@ -229,21 +241,25 @@ export default function Page() {
           </div>
 
           <p className="noticeText">
-            API認証結果: {apiResult ? JSON.stringify(apiResult) : "未取得"}
+            API認証結果: {apiResult ? JSON.stringify({ ok: apiResult.ok, now: apiResult.now, expiresIn: apiResult.expiresIn }) : "未取得"}
           </p>
 
-          <iframe
-            src={gasUrl}
-            title="GAS Web App"
-            className="frame"
-            loading="lazy"
-            allow="clipboard-read; clipboard-write"
-          />
+          {iframeSrc ? (
+            <iframe
+              src={iframeSrc}
+              title="GAS Web App"
+              className="frame"
+              loading="lazy"
+              allow="clipboard-read; clipboard-write"
+            />
+          ) : (
+            <p className="noticeError">iframe セッションが取得できませんでした。</p>
+          )}
         </section>
       )}
 
       <footer className="footer">
-        <p>id_token は URL や localStorage に保存せず、ログイン直後に GAS へ POST しています。</p>
+        <p>id_token は URL や localStorage に保存せず、ログイン直後にサーバー経由で送信しています。</p>
       </footer>
     </main>
   );
