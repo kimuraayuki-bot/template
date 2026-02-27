@@ -1,21 +1,32 @@
-"use client";
+﻿"use client";
 
 import Script from "next/script";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { GasApiError, callGasApi } from "@/lib/gasApi";
 
-type AuthState = "checking" | "signed_out" | "signed_in" | "denied" | "error";
+type AuthState =
+  | "checking"
+  | "signed_out"
+  | "authorizing"
+  | "signed_in"
+  | "denied"
+  | "error";
 
 type JwtPayload = {
   email?: string;
   name?: string;
   picture?: string;
-  email_verified?: boolean;
 };
 
 type UserInfo = {
   email: string;
   name: string;
   picture?: string;
+};
+
+type GasPingResult = {
+  ok: boolean;
+  now: string;
 };
 
 type GoogleCredentialResponse = {
@@ -43,13 +54,6 @@ type GoogleIdentity = {
 
 const gasUrl = process.env.NEXT_PUBLIC_GAS_WEBAPP_URL;
 const googleClientId = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID;
-const allowedEmails = (process.env.NEXT_PUBLIC_ALLOWED_EMAILS ?? "")
-  .split(",")
-  .map((item) => item.trim().toLowerCase())
-  .filter(Boolean);
-const allowedDomain = (process.env.NEXT_PUBLIC_ALLOWED_DOMAIN ?? "")
-  .trim()
-  .toLowerCase();
 
 function base64UrlDecode(value: string): string {
   const padded = value + "=".repeat((4 - (value.length % 4)) % 4);
@@ -62,65 +66,92 @@ function parseJwt(credential: string): JwtPayload | null {
   if (sections.length < 2) return null;
 
   try {
-    const payload = JSON.parse(base64UrlDecode(sections[1])) as JwtPayload;
-    return payload;
+    return JSON.parse(base64UrlDecode(sections[1])) as JwtPayload;
   } catch {
     return null;
   }
 }
 
-function isEmailAllowed(email: string): boolean {
-  const normalized = email.toLowerCase();
-  if (allowedEmails.length > 0 && allowedEmails.includes(normalized)) return true;
-  if (allowedDomain && normalized.endsWith(`@${allowedDomain}`)) return true;
-  return allowedEmails.length === 0 && !allowedDomain;
+function toUserMessage(error: unknown): string {
+  if (!(error instanceof GasApiError)) {
+    return "認証処理に失敗しました。時間をおいて再実行してください。";
+  }
+
+  if (error.status === 401) {
+    return "認証に失敗しました。Googleで再ログインしてください。";
+  }
+  if (error.status === 403) {
+    return "このGoogleアカウントにはアクセス権限がありません。";
+  }
+  if (error.status === 0) {
+    return "ネットワークエラーが発生しました。接続を確認してください。";
+  }
+
+  return error.message || "サーバーとの通信に失敗しました。";
 }
 
 export default function Page() {
   const [authState, setAuthState] = useState<AuthState>("checking");
   const [user, setUser] = useState<UserInfo | null>(null);
   const [scriptReady, setScriptReady] = useState(false);
+  const [apiResult, setApiResult] = useState<GasPingResult | null>(null);
+  const [errorMessage, setErrorMessage] = useState("");
   const buttonRef = useRef<HTMLDivElement | null>(null);
 
-  const handleCredential = useCallback((response: GoogleCredentialResponse) => {
+  const handleCredential = useCallback(async (response: GoogleCredentialResponse) => {
     if (!response.credential) {
       setAuthState("error");
+      setErrorMessage("Googleからトークンを受け取れませんでした。");
       return;
     }
 
     const payload = parseJwt(response.credential);
-    if (!payload?.email || !payload.email_verified) {
-      setAuthState("denied");
+    if (!payload?.email) {
+      setAuthState("error");
+      setErrorMessage("Googleアカウント情報の読み取りに失敗しました。");
       return;
     }
 
-    if (!isEmailAllowed(payload.email)) {
-      setAuthState("denied");
-      return;
-    }
+    setAuthState("authorizing");
+    setErrorMessage("");
 
-    setUser({
-      email: payload.email,
-      name: payload.name ?? payload.email,
-      picture: payload.picture,
-    });
-    setAuthState("signed_in");
+    try {
+      const gasResponse = await callGasApi<GasPingResult>(response.credential, "ping", {});
+      setUser({
+        email: payload.email,
+        name: payload.name ?? payload.email,
+        picture: payload.picture,
+      });
+      setApiResult(gasResponse.data);
+      setAuthState("signed_in");
+    } catch (error) {
+      setUser(null);
+      setApiResult(null);
+      setAuthState(error instanceof GasApiError && error.status === 403 ? "denied" : "error");
+      setErrorMessage(toUserMessage(error));
+    }
   }, []);
 
   useEffect(() => {
     if (!googleClientId) {
       setAuthState("error");
+      setErrorMessage("NEXT_PUBLIC_GOOGLE_CLIENT_ID が未設定です。");
       return;
     }
 
-    if (!scriptReady || authState === "signed_in" || !buttonRef.current) return;
+    if (!scriptReady || authState === "signed_in" || authState === "authorizing" || !buttonRef.current) {
+      return;
+    }
 
     const google = (window as Window & { google?: GoogleIdentity }).google;
     if (!google) return;
 
+    buttonRef.current.innerHTML = "";
     google.accounts.id.initialize({
       client_id: googleClientId,
-      callback: handleCredential,
+      callback: (credentialResponse) => {
+        void handleCredential(credentialResponse);
+      },
     });
     google.accounts.id.renderButton(buttonRef.current, {
       theme: "outline",
@@ -130,7 +161,7 @@ export default function Page() {
       text: "signin_with",
     });
     google.accounts.id.prompt();
-    setAuthState("signed_out");
+    if (authState === "checking") setAuthState("signed_out");
 
     return () => {
       google.accounts.id.cancel();
@@ -142,6 +173,8 @@ export default function Page() {
     if (google && user?.email) google.accounts.id.revoke(user.email, () => {});
     if (google) google.accounts.id.disableAutoSelect();
     setUser(null);
+    setApiResult(null);
+    setErrorMessage("");
     setAuthState("signed_out");
   };
 
@@ -170,15 +203,11 @@ export default function Page() {
       ) : authState !== "signed_in" ? (
         <section className="notice">
           <h2>Google ログインが必要です</h2>
-          <p className="noticeText">ログイン成功後に埋め込み UI を表示します。</p>
+          <p className="noticeText">ログイン成功後に id_token を GAS へ POST して認証します。</p>
           <div ref={buttonRef} className="googleButton" />
-          {authState === "denied" ? (
-            <p className="noticeError">
-              この Google アカウントではアクセスできません。許可メール/ドメインを確認してください。
-            </p>
-          ) : null}
-          {authState === "error" ? (
-            <p className="noticeError">認証初期化に失敗しました。環境変数を確認してください。</p>
+          {authState === "authorizing" ? <p className="noticeText">認証中...</p> : null}
+          {authState === "denied" || authState === "error" ? (
+            <p className="noticeError">{errorMessage}</p>
           ) : null}
         </section>
       ) : (
@@ -198,6 +227,11 @@ export default function Page() {
               Sign out
             </button>
           </div>
+
+          <p className="noticeText">
+            API認証結果: {apiResult ? JSON.stringify(apiResult) : "未取得"}
+          </p>
+
           <iframe
             src={gasUrl}
             title="GAS Web App"
@@ -209,7 +243,7 @@ export default function Page() {
       )}
 
       <footer className="footer">
-        <p>Tips: このUIガードに加えて、GAS側でも認可チェックを入れてください。</p>
+        <p>id_token は URL や localStorage に保存せず、ログイン直後に GAS へ POST しています。</p>
       </footer>
     </main>
   );
