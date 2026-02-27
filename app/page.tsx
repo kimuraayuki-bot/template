@@ -42,7 +42,6 @@ type GoogleIdentity = {
 };
 
 const gasUrl = process.env.NEXT_PUBLIC_GAS_WEBAPP_URL;
-const appTitle = process.env.NEXT_PUBLIC_APP_TITLE ?? "GAS Embedded App";
 const googleClientId = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID;
 const allowedEmails = (process.env.NEXT_PUBLIC_ALLOWED_EMAILS ?? "")
   .split(",")
@@ -153,11 +152,6 @@ export default function Page() {
         strategy="afterInteractive"
         onLoad={() => setScriptReady(true)}
       />
-
-      <header className="header">
-        <p className="badge">React + Vercel Template</p>
-        <h1>{appTitle}</h1>
-      </header>
 
       {!gasUrl ? (
         <section className="notice">
