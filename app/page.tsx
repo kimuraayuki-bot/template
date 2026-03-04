@@ -1,7 +1,7 @@
-﻿"use client";
+"use client";
 
 import Script from "next/script";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { GasApiError, callGasApi } from "@/lib/gasApi";
 
 type AuthState =
@@ -91,13 +91,11 @@ export default function Page() {
   const [scriptReady, setScriptReady] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
   const [sessionToken, setSessionToken] = useState("");
+  const [idToken, setIdToken] = useState("");
   const buttonRef = useRef<HTMLDivElement | null>(null);
-
-  const iframeSrc = useMemo(() => {
-    if (!gasUrl || !sessionToken) return "";
-    const sep = gasUrl.includes("?") ? "&" : "?";
-    return `${gasUrl}${sep}st=${encodeURIComponent(sessionToken)}`;
-  }, [sessionToken]);
+  const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const bootstrapFormRef = useRef<HTMLFormElement | null>(null);
+  const submittedSessionRef = useRef("");
 
   const handleCredential = useCallback(async (response: GoogleCredentialResponse) => {
     if (!response.credential) {
@@ -115,6 +113,7 @@ export default function Page() {
 
     setAuthState("authorizing");
     setErrorMessage("");
+    setIdToken(response.credential);
 
     try {
       const gasResponse = await callGasApi<{
@@ -129,11 +128,37 @@ export default function Page() {
       setAuthState("signed_in");
     } catch (error) {
       setUser(null);
+      setIdToken("");
       setSessionToken("");
       setAuthState(error instanceof GasApiError && error.status === 403 ? "denied" : "error");
       setErrorMessage(toUserMessage(error));
     }
   }, []);
+
+  useEffect(() => {
+    const onMessage = (event: MessageEvent) => {
+      if (event.source !== iframeRef.current?.contentWindow) return;
+      if (event.data?.type !== "gas-session-expired") return;
+
+      submittedSessionRef.current = "";
+      setUser(null);
+      setIdToken("");
+      setSessionToken("");
+      setAuthState("signed_out");
+      setErrorMessage("セッションの有効期限が切れました。Googleで再ログインしてください。");
+    };
+
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, []);
+
+  useEffect(() => {
+    if (authState !== "signed_in" || !sessionToken || !gasUrl || !bootstrapFormRef.current) return;
+    if (submittedSessionRef.current === sessionToken) return;
+
+    submittedSessionRef.current = sessionToken;
+    bootstrapFormRef.current.submit();
+  }, [authState, sessionToken]);
 
   useEffect(() => {
     if (!googleClientId) {
@@ -175,7 +200,14 @@ export default function Page() {
     const google = (window as Window & { google?: GoogleIdentity }).google;
     if (google && user?.email) google.accounts.id.revoke(user.email, () => {});
     if (google) google.accounts.id.disableAutoSelect();
+
+    if (idToken && sessionToken) {
+      void callGasApi(idToken, "revokeSession", { sessionToken }).catch(() => undefined);
+    }
+
+    submittedSessionRef.current = "";
     setUser(null);
+    setIdToken("");
     setSessionToken("");
     setErrorMessage("");
     setAuthState("signed_out");
@@ -214,20 +246,22 @@ export default function Page() {
         </section>
       ) : (
         <section className="appShell">
+          <form ref={bootstrapFormRef} action={gasUrl} method="post" target="gas-app-frame" hidden>
+            <input type="hidden" name="bootstrapSessionToken" value={sessionToken} />
+          </form>
           <button type="button" onClick={handleSignOut} className="floatingSignOut">
             Sign out
           </button>
-          {iframeSrc ? (
-            <iframe
-              src={iframeSrc}
-              title="GAS Web App"
-              className="frame frameFullscreen"
-              loading="lazy"
-              allow="clipboard-read; clipboard-write"
-            />
-          ) : (
-            <p className="noticeError">iframe セッションが取得できませんでした。</p>
-          )}
+          <iframe
+            ref={iframeRef}
+            name="gas-app-frame"
+            src="about:blank"
+            title="GAS Web App"
+            className="frame frameFullscreen"
+            loading="lazy"
+            allow="clipboard-read; clipboard-write"
+            referrerPolicy="no-referrer"
+          />
         </section>
       )}
     </main>
